@@ -4,17 +4,15 @@ const React = require('react')
 const xtend = require('xtend')
 
 function astToReact(node, options, parent = {}, index = 0) {
-  if (node.type === 'text') {
-    return node.value
-  }
-
   const renderer = options.renderers[node.type]
-  if (typeof renderer !== 'function' && typeof renderer !== 'string') {
-    throw new Error(`Renderer for type \`${node.type}\` not defined or is not renderable`)
-  }
 
   const pos = node.position.start
   const key = [node.type, pos.line, pos.column].join('-')
+
+  if (typeof renderer !== 'function' && typeof renderer !== 'string' && !isReactFragment(renderer)) {
+    throw new Error(`Renderer for type \`${node.type}\` not defined or is not renderable`)
+  }
+
   const nodeProps = getNodeProps(node, key, options, renderer, parent, index)
 
   return React.createElement(
@@ -33,20 +31,40 @@ function astToReact(node, options, parent = {}, index = 0) {
   }
 }
 
+function isReactFragment(renderer) {
+  return React.Fragment && React.Fragment === renderer;
+}
+
 // eslint-disable-next-line max-params, complexity
 function getNodeProps(node, key, opts, renderer, parent, index) {
   const props = {key}
+
+  const isTagRenderer = typeof renderer === 'string'
 
   // `sourcePos` is true if the user wants source information (line/column info from markdown source)
   if (opts.sourcePos && node.position) {
     props['data-sourcepos'] = flattenPosition(node.position)
   }
 
-  const ref = node.identifier ? opts.definitions[node.identifier] || {} : null
+  if (opts.rawSourcePos && !isTagRenderer) {
+    props.sourcePosition = node.position
+  }
+
+  // If `includeNodeIndex` is true, pass node index info to all non-tag renderers
+  if (opts.includeNodeIndex && parent.node && parent.node.children && !isTagRenderer) {
+    props.index = parent.node.children.indexOf(node);
+    props.parentChildCount = parent.node.children.length;
+  }
+
+  const ref = (node.identifier !== null && node.identifier !== undefined) ? opts.definitions[node.identifier] || {} : null
 
   switch (node.type) {
     case 'root':
       assignDefined(props, {className: opts.className})
+      break
+    case 'text':
+      props.nodeKey = key
+      props.children = node.value
       break
     case 'heading':
       props.level = node.depth
@@ -55,19 +73,22 @@ function getNodeProps(node, key, opts, renderer, parent, index) {
       props.start = node.start
       props.ordered = node.ordered
       props.tight = !node.loose
+      props.depth = node.depth
       break
     case 'listItem':
       props.checked = node.checked
       props.tight = !node.loose
-      props.children = (props.tight ? unwrapParagraphs(node) : node.children).map((childNode, i) => {
-        return astToReact(childNode, opts, { node: node, props: props }, i)
+      props.ordered = node.ordered
+      props.index = node.index
+      props.children = getListItemChildren(node, parent).map((childNode, i) => {
+        return astToReact(childNode, opts, {node: node, props: props}, i)
       })
       break
     case 'definition':
       assignDefined(props, {identifier: node.identifier, title: node.title, url: node.url})
       break
     case 'code':
-      assignDefined(props, {language: node.lang})
+      assignDefined(props, {language: node.lang && node.lang.split(/\s/, 1)[0]})
       break
     case 'inlineCode':
       props.children = node.value
@@ -76,6 +97,7 @@ function getNodeProps(node, key, opts, renderer, parent, index) {
     case 'link':
       assignDefined(props, {
         title: node.title || undefined,
+        target: typeof opts.linkTarget === 'function' ? opts.linkTarget(node.url, node.children, node.title) : opts.linkTarget,
         href: opts.transformLinkUri ? opts.transformLinkUri(node.url, node.children, node.title) : node.url
       })
       break
@@ -96,7 +118,10 @@ function getNodeProps(node, key, opts, renderer, parent, index) {
       break
     case 'imageReference':
       assignDefined(props, {
-        src: ref.href,
+        src:
+          opts.transformImageUri && ref.href
+            ? opts.transformImageUri(ref.href, node.children, ref.title, node.alt)
+            : ref.href,
         title: ref.title || undefined,
         alt: node.alt || undefined
       })
@@ -125,10 +150,25 @@ function getNodeProps(node, key, opts, renderer, parent, index) {
       props.escapeHtml = opts.escapeHtml
       props.skipHtml = opts.skipHtml
       break
+    case 'parsedHtml':
+      props.escapeHtml = opts.escapeHtml
+      props.skipHtml = opts.skipHtml
+      props.element = mergeNodeChildren(node, (node.children || []).map(
+        (child, i) => astToReact(child, opts, {node, props}, i))
+      )
+      break
     default:
+      assignDefined(
+        props,
+        xtend(node, {
+          type: undefined,
+          position: undefined,
+          children: undefined,
+        }),
+      )
   }
 
-  if (typeof renderer !== 'string' && node.value) {
+  if (!isTagRenderer && node.value) {
     props.value = node.value
   }
 
@@ -143,10 +183,33 @@ function assignDefined(target, attrs) {
   }
 }
 
+function mergeNodeChildren(node, parsedChildren) {
+  const el = node.element
+  if (Array.isArray(el)) {
+    const Fragment = React.Fragment || 'div'
+    return React.createElement(Fragment, null, el)
+  }
+
+  const children = (el.props.children || []).concat(parsedChildren)
+  return React.cloneElement(el, null, children)
+}
+
 function flattenPosition(pos) {
   return [pos.start.line, ':', pos.start.column, '-', pos.end.line, ':', pos.end.column]
     .map(String)
     .join('')
+}
+
+function getListItemChildren(node, parent) {
+  if (node.loose) {
+    return node.children;
+  }
+
+  if (parent.node && node.index > 0 && parent.node.children[node.index - 1].loose) {
+    return node.children;
+  }
+
+  return unwrapParagraphs(node);
 }
 
 function unwrapParagraphs(node) {

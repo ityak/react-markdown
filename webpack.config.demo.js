@@ -6,6 +6,7 @@ const webpack = require('webpack')
 const prod = process.env.NODE_ENV === 'production'
 
 const config = {
+  mode: prod ? 'production' : 'development',
   devtool: prod ? false : 'eval',
 
   entry: [path.join(__dirname, 'demo', 'src', 'demo.js')],
@@ -33,10 +34,13 @@ const config = {
   },
 
   module: {
-    loaders: [
+    rules: [
       {
         test: /\.js$/,
-        loader: 'babel-loader'
+        exclude: /node_modules/,
+        use: {
+          loader: 'babel-loader'
+        }
       }
     ]
   },
@@ -48,7 +52,6 @@ if (prod) {
   config.plugins.push(
     new webpack.DefinePlugin({'process.env.NODE_ENV': JSON.stringify('production')})
   )
-  config.plugins.push(new webpack.optimize.UglifyJsPlugin())
 }
 
 module.exports = config
